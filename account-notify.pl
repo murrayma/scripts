@@ -3,7 +3,7 @@
 use Irssi qw(signal_stop signal_emit signal_remove
              signal_add signal_add_first
              settings_add_str settings_get_str settings_add_bool
-	     settings_get_bool
+         settings_get_bool
              print );
 use strict;
 
@@ -21,92 +21,239 @@ my(@format_identify_message_formats) = qw(pubmsg pubmsg_channel msg_private
                                          );
 
 
+
+
+Irssi::theme_register([
+  'join', '{channick_hilight $0} {chanhost_hilight $1} has joined {channel $2}',
+  'join_realname', '{channick_hilight $0} (realname: {hilight $1}) {chanhost_hilight $2} has joined {channel $3}',
+  'join_account_realname', '{channick_hilight $0 [account: $1]} (realname: {hilight $2}) {chanhost_hilight $3} has joined {channel $4}',
+]);
+
+my %servers;
+
 sub msg_join {
-  my $target;
-  my ($server, $channame, $nick, $host) = @_;
-  if ($nick eq $server->{nick}) {
-    $target=$channame;
-  } else {
-    $target=$nick;
-  }
+    my $target;
+    my ($channel, $account, $realname);
+    my ($server, $data, $nick, $host) = @_;
 
-  $server->redirect_event(
-			  'who', 1, '', 1, undef,
-			  {
-			   "event 354" => "redir account-notify_354",
-			   ""          => "event empty"
-			  }
-			 );
+    if ($nick eq $server->{nick}) {
+        if ($data=~/(\S+) (\S+) :(.*)/) {
+            $channel=$1;
+            $account=$2;
+            $realname=$3;
+        } else {
+            if ($data=~/:(\S+)/) {
+                $channel=$1;
+            } else {
+                $channel=$data;
+            }
+        }
+        $server->print('', "ACCOUNT-NOTIFY: requesting account information for $channel.");
 
-  $server->send_raw("WHO $target %na");
+        $target=$channel;
+        $server->redirect_event(
+                'who', 1, '', 1, undef,
+                {
+                "event 354" => "redir account-notify_354",
+                ""          => "event empty"
+                }
+                );
+
+        $server->send_raw("WHO $target %na");
+        return;
+    }
+    
+    Irssi::signal_stop();
+
+    if ($data=~/(\S+) (\S+) :(.*)/) {
+        $channel=$1;
+        $account=$2;
+        $realname=$3;
+        #Irssi::print("extended, channel $1, nick $nick account $2, realname $3");
+
+        if ($account eq '*' || $account eq '0') {
+            if (exists $account_data{$nick}) {
+                delete $account_data{$nick};
+            }
+        } else {
+            $account_data{$nick} = $account;
+        }
+    } else { 
+        if ($data=~/:(\S+)/) {
+            $channel=$1;
+        } else {
+            Irssi::print("SHOULD NOT BE HERE. data is $data and $nick is $nick.");
+            $channel=$data;
+        }
+
+        if ($nick eq $server->{nick}) {
+            $target=$data;
+        } else {
+            $target=$nick;
+        }
+        $server->redirect_event(
+                'who', 1, '', 1, undef,
+                {
+                "event 354" => "redir account-notify_354",
+                ""          => "event empty"
+                }
+                );
+
+        $server->send_raw("WHO $target %na");
+    }
+
+    my $chanrec = $server->channel_find($channel);
+    if ($chanrec && $realname && $account && $account ne '*') {
+       $chanrec->printformat(MSGLEVEL_JOINS, 'join_account_realname', $nick, $account, $realname, $host, $channel);
+    } elsif ($chanrec && $realname) {
+       $chanrec->printformat(MSGLEVEL_JOINS, 'join_realname', $nick, $realname, $host, $channel);
+    } elsif ($chanrec) {
+       $chanrec->printformat(MSGLEVEL_JOINS, 'join', $nick, $host, $channel);
+    }
+
+    return;
 }
 
 sub event_account {
-  my ($server, $account, $nick, $mask) = @_;
-  Irssi::print("$nick is now authenticated as $account");
-  if ($account eq '*') { 
-    delete $account_data{$nick};
-  } else {  
-    $account_data{$nick}=$account;
-  }
+    my ($server, $account, $nick, $mask) = @_;
+
+
+
+    my @chans = $server->channels();
+    my @outchans = qw();
+    foreach my $tmpchan (@chans) {
+        my @nicks = $tmpchan->nicks();
+        foreach my $tmpnick (@nicks) {
+            if($tmpnick->{nick} eq $nick) {
+                push(@outchans, $tmpchan);
+                last;
+            }
+        }
+    }
+
+    my $message = "";
+    if ($account eq '*' || $account eq '0') {
+        if(exists $account_data{$nick}) {
+            $message = "$nick is no longer authenticated, was $account_data{$nick}.";
+            delete $account_data{$nick};
+        } else {
+            $message = "$nick is not authenticated.";
+        }
+    } else {
+        if(exists $account_data{$nick} && $account_data{$nick} ne $account) {
+            $message = "$nick was authenticated as $account_data{$nick}, and is now $account";
+            delete $account_data{$nick};
+        } else {
+            $message = "$nick is now authenticated as $account.";
+        }
+        $account_data{$nick}=$account;
+    }
+
+    foreach my $tmpchan (@outchans) {
+        $tmpchan->print($message);
+    }
+
+    return;
 }
+
+sub event_nick {
+    my ($server, $newnick, $nick, $address) = @_;
+
+    $newnick = substr ($newnick, 1) if ($newnick =~ /^:/);
+    
+    if (exists $account_data{$newnick}) {
+        Irssi::print("Warning! severe braindamage! $newnick already had account $account_data{$newnick}!");
+        delete $account_data{$newnick};
+    }
+
+    if (exists $account_data{$nick}) {
+        $account_data{$newnick} = $account_data{$nick};
+        delete $account_data{$nick};
+        my @chans = $server->channels();
+        foreach my $tmpchan (@chans) {
+            my @nicks = $tmpchan->nicks();
+            foreach my $tmpnick (@nicks) {
+                if($tmpnick->{nick} eq $nick || $tmpnick->{nick} eq $newnick) {
+                    $tmpchan->print("Account $account_data{$newnick} ported from $nick to $newnick.");
+                    last;
+                }
+            }
+        }
+    }
+}
+
 sub event_354 {
-  my ($server, $data) = @_;
-  my ($me, $nick, $account) = split(/ +/, $data, 7);
-  if ($account eq '0') {
-    delete $account_data{$nick};
-    Irssi::print("$nick is not authenticated");
-  } else {
-    $account_data{$nick}=$account;
-    Irssi::print("$nick is authenticated as $account");
-  }
+    my ($server, $data) = @_;
+    my ($me, $nick, $account) = split(/ +/, $data, 7);
+
+    if ($account eq '*' || $account eq '0') {
+        if(exists $account_data{$nick}) {
+            Irssi::print("$nick is no longer authenticated, was $account_data{$nick}.");
+            delete $account_data{$nick};
+        } else {
+            #Irssi::print("$nick is still not authenticated.");
+        }
+    } else {
+        if(exists $account_data{$nick} && $account_data{$nick} ne $account) {
+            Irssi::print("$nick was authenticated as $account_data{$nick}, and is now $account");
+            delete $account_data{$nick};
+        } else {
+            #Irssi::print("$nick is now authenticated as $account.");
+        }
+        $account_data{$nick}=$account;
+    }
 }
 
 sub format_account_notify_message {
-  my ($server, $data, $nick, $address) = @_;
-  my ($channel, $msg) = split(/ :/, $data,2);
-  my ($suffix) = "";
-  #my $chanref=$server->channel_find($channel);
+    my ($server, $data, $nick, $address) = @_;
+    my ($channel, $msg) = split(/ :/, $data,2);
+    my ($suffix) = "";
+
+#my $chanref=$server->channel_find($channel);
 #  if ($account_data{$nick}) {
 #      Irssi::print("notify_message. $nick identified as $account_data{$nick}"); 
-#  }
-  foreach my $format (@format_identify_message_formats) {
-    if ($account_data{$nick}) {
-        if (lc($account_data{$nick}) ne lc($nick)) {
-            $suffix = "($account_data{$nick})";
+#  }ported 
+
+    foreach my $format (@format_identify_message_formats) {
+        if ($account_data{$nick}) {
+            if (lc($account_data{$nick}) ne lc($nick)) {
+                $suffix = "%G($account_data{$nick})";
+            } else { 
+                $suffix = "";
+            }
+
+            update_format_identify($server,$format,colourise($nick). '%U$0%U' . $suffix);
+        } else {
+            update_format_identify($server,$format,colourise($nick).'$0');
         }
-      update_format_identify($server,$format,colourise($nick). '%G$0' . $suffix);
-    } else {
-      update_format_identify($server,$format,colourise($nick).'$0');
     }
-  }
-  format_identify_rewrite('event privmsg','format_account_notify_message', $server,$data,$nick,$address);
+    format_identify_rewrite('event privmsg','format_account_notify_message', $server,$data,$nick,$address);
 }
 
 sub replace_format_identify {
-  my ($format, $entry) = @_;
+    my ($format, $entry) = @_;
 
-  my ($nickarg) = $format =~ /{\s*format_identify\s+?([^\s]+?)\s*}/;
-  $entry =~ s/\$0/$nickarg/;
-  $format =~ s/{\s*format_identify\s+?[^\s]+?\s*}/$entry/g;
-  return $format;
+    my ($nickarg) = $format =~ /{\s*format_identify\s+?([^\s]+?)\s*}/;
+    $entry =~ s/\$0/$nickarg/;
+    $format =~ s/{\s*format_identify\s+?[^\s]+?\s*}/$entry/g;
+    return $format;
 }
 
 # rewrite the message now that we've updated the formats
 sub format_identify_rewrite {
-  my $signal = shift;
-  my $proc = shift;
+    my $signal = shift;
+    my $proc = shift;
 
-  signal_stop();
-  signal_remove($signal,$proc);
-  signal_emit($signal, @_);
-  signal_add($signal,$proc);
+    signal_stop();
+    signal_remove($signal,$proc);
+    signal_emit($signal, @_);
+    signal_add($signal,$proc);
 }
 
-  
+
 # Issue the format update after generating the new format.
 sub update_format_identify {
-  my ($server,$entry,$nick) = @_;
+    my ($server,$entry,$nick) = @_;
 
 #
 #  if ($account_data{$nick}) {
@@ -114,69 +261,79 @@ sub update_format_identify {
 #  } else {
 #      $nick="$nick(unknown)";
 #  }
-#
-  my $identify_format = settings_get_str("${entry}_identify");
-  my $replaced_format = replace_format_identify($identify_format,$nick);
-  $server->command("^format $entry " . $replaced_format);
+
+    my $identify_format = settings_get_str("${entry}_identify");
+    my $replaced_format = replace_format_identify($identify_format,$nick);
+    $server->command("^format $entry " . $replaced_format);
 }
 
 sub msg_nick {
-  my ($server, $newnick, $nick, $address) = @_;
-  if ($account_data{$nick}) {
-    $account_data{$newnick}=$account_data{$nick};
-    delete $account_data{$nick};
-  }
+    my ($server, $newnick, $nick, $address) = @_;
+    if ($account_data{$nick}) {
+        $account_data{$newnick}=$account_data{$nick};
+        delete $account_data{$nick};
+    }
+}
+#
+sub event_cap {
+    my ($server, $args, $nick, $address) = @_;
+    my ($subcmd, $caps, $tosend);
+
+    Irssi::print("received event_cap! hurray! $args ");
+
 }
 
 sub msg_quit {
-  my ($server, $nick, $address, $data) = @_;
-  if ($account_data{$nick}) {
-    delete $account_data{$nick};
-  }
+    my ($server, $nick, $address, $data) = @_;
+    if ($account_data{$nick}) {
+        delete $account_data{$nick};
+    }
 }
 
 sub account_notify_connected {
-  my $server = shift;
-  $server->command("^quote cap req :account-notify extended-join");
+    my $server = shift;
+    $server->print('', "ACCOUNT-NOTIFY: requesting caps: account-notify extended-join.");
+    $server->send_raw_now("CAP REQ :account-notify extended-join");
 }
 
 Irssi::signal_add( {
-		    'message join' => \&msg_join,
-		    'event account' => \&event_account,
-		    'redir account-notify_354' => \&event_354,
-		    'event privmsg', 'format_account_notify_message',
-		    'message nick', \&msg_nick,
-		    'message nick', \&msg_quit,
-		    'event connected', \&account_notify_connected
-		   });
+        'event join' => \&msg_join,
+        'event account' => \&event_account,
+        'event cap' =>\&event_cap,
+        'redir account-notify_354' => \&event_354,
+        'event nick' => \&event_nick, 
+        'event privmsg', 'format_account_notify_message',
+        'event quit', \&msg_quit,
+        'event connected', \&account_notify_connected
+        });
 
 sub simple_hash {
-  my ($string) = @_;
-  chomp $string;
-  my @chars = split //, $string;
-  my $counter;
+    my ($string) = @_;
+    chomp $string;
+    my @chars = split //, $string;
+    my $counter;
 
-  foreach my $char (@chars) {
-    $counter += ord $char;
-  }
+    foreach my $char (@chars) {
+        $counter += ord $char;
+    }
 
-  $counter = $colors[($counter % @colors)];
-  return $counter;
+    $counter = $colors[($counter % @colors)];
+    return $counter;
 }
 
 sub colourise {
-  return if(!settings_get_bool('format_colour'));
-  my ($nick) = @_;
-  my $color = $saved_colors{$nick};
-  if (!$color) {
-    $color = $session_colors{$nick};
-  }
-  if (!$color) {
-    $color = simple_hash $nick;
-    $session_colors{$nick} = $color;
-  }
-  $color = "0".$color if ($color < 10);
-  return chr(3).$color;
+    return if(!settings_get_bool('format_colour'));
+    my ($nick) = @_;
+    my $color = $saved_colors{$nick};
+    if (!$color) {
+        $color = $session_colors{$nick};
+    }
+    if (!$color) {
+        $color = simple_hash $nick;
+        $session_colors{$nick} = $color;
+    }
+    $color = "0".$color if ($color < 10);
+    return chr(3).$color;
 }
 
 
@@ -184,6 +341,24 @@ foreach my $server (Irssi::servers()) {
 #    %servers = ();
     account_notify_connected($server);
 }
+
+
+sub cmd_acno {
+    my ($data, $server, $item) = @_;
+    Irssi::print("\$data $data \$server $server \$item $item");
+    $server->redirect_event(
+            'who', 1, '', 1, undef,
+            {
+            "event 354" => "redir account-notify_354",
+            ""          => "event empty"
+            }
+            );
+
+    $server->send_raw("WHO $data %na");
+}
+
+Irssi::command_bind('acno', \&cmd_acno);
+
 
 # How we format the nick.  $0 is the nick we'll be formating.
 settings_add_str('format_identify','format_identified_nick','$0');
@@ -211,4 +386,4 @@ settings_add_str('format_identify','notice_public_identify','{notice {format_ide
 settings_add_str('format_identify','notice_private_identify','{notice {format_identify $0}{pvtnotice_host $1}}$2');
 settings_add_str('format_identify','ctcp_reply_identify','CTCP {hilight $0} reply from {nick {format_identify $1}}: $2');
 settings_add_str('format_identify','ctcp_reply_channel_identify','CTCP {hilight $0} reply from {nick {format_identify $1}} in channel {channel $3}: $2');
-settings_add_str('format_identify','ctcp_ping_reply_identify','CTCP {hilight PING} reply from {nick {format_identify $0}}: $1.$[-3.0]2 seconds');
+settings_add_str('format_identify','ctcp_ping_reply_identify','CTCP {hilight PING} reply from {nick {format_identify $2}}: $1.$[-3.0]2 seconds');
