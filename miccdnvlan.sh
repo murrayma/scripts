@@ -31,16 +31,33 @@ else
     echo "Device ${NETDEV} not found - are you using systemd? This is what you get." 
 fi
 
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6
+
 /sbin/modprobe 8021q
 /sbin/vconfig set_name_type DEV_PLUS_VID_NO_PAD
+
+/sbin/iptables -t nat -F POSTROUTING 
+/sbin/iptables -P FORWARD DROP
+/sbin/iptables -i eth1 
 
 for VLAN in {0..11}; do
     echo -n Team ${VLAN}
     nukeAndCreateVIF ${NETDEV} ${WANVLANS[VLAN]} ${VLAN} wan
+    /sbin/ifconfig team${VLAN}wan 172.31.${VLAN}.5/29
+    /sbin/iptables -t nat -A POSTROUTING -d 172.31.${VLAN}.0/29 -o team${VLAN}wan -j MASQUERADE
     echo -n " wan"
+
     nukeAndCreateVIF ${NETDEV} ${DMZVLANS[VLAN]} ${VLAN} dmz
+    /sbin/ifconfig team${VLAN}dmz 172.${VLAN}.240.201/24
+    /sbin/iptables -t nat -A POSTROUTING -d 172.${VLAN}.240.0/24 -o team${VLAN}dmz -j MASQUERADE
     echo -n " dmz"
+
     nukeAndCreateVIF ${NETDEV} ${LANVLANS[VLAN]} ${VLAN} lan
     echo " lan"
+    /sbin/ifconfig team${VLAN}lan 172.${VLAN}.241.201/24
+    /sbin/iptables -t nat -A POSTROUTING -d 172.${VLAN}.241.0/24 -o team${VLAN}lan -j MASQUERADE
+
 done
 
